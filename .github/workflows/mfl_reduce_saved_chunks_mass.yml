@@ -90,18 +90,23 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+      - name: Restore pip download cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: mfl-pip-duckdb-v1-${{ runner.os }}-py311
       - name: Install DuckDB
-        run: pip install duckdb
+        run: python -m pip install --disable-pip-version-check duckdb==1.5.1
       - name: Union and de-duplicate source chunks
         env:
           OUTPUT_KEY: ${{ inputs.cache_namespace }}-chunk-${{ inputs.output_suffix }}
         run: |
           python -u - <<'PY'
-import json
-import re
-import time
-from pathlib import Path
-import duckdb
+          import json
+          import re
+          import time
+          from pathlib import Path
+          import duckdb
 
           TABLES = ('league_settings', 'matchup', 'player_fantasy')
           prior_path = Path('prior_index/mfl_register_all_runs.json')
