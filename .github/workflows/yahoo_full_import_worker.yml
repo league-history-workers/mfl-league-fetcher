@@ -216,7 +216,7 @@ jobs:
           CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
           DATABASE_NAME: ${{ steps.parse.outputs.credential_database_name }}
           LEAGUE_ID: ${{ steps.parse.outputs.league_id }}
-          LEAGUE_NAME: ${{ steps.parse.outputs.league_name }}
+          LEAGUE_NAME: ${{ steps.parse.outputs.credential_league_name }}
         run: |
           if [ -z "$CREDENTIAL_ENCRYPTION_KEY" ]; then
             echo "CREDENTIAL_ENCRYPTION_KEY not set - skipping"
@@ -670,7 +670,7 @@ jobs:
           CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
           DATABASE_NAME: ${{ steps.parse.outputs.credential_database_name }}
           LEAGUE_ID: ${{ steps.parse.outputs.league_id }}
-          LEAGUE_NAME: ${{ steps.parse.outputs.league_name }}
+          LEAGUE_NAME: ${{ steps.parse.outputs.credential_league_name }}
         run: |
           if [ -z "$CREDENTIAL_ENCRYPTION_KEY" ]; then
             echo "CREDENTIAL_ENCRYPTION_KEY not set - weekly updates will require manual auth"
