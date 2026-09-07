@@ -214,7 +214,7 @@ jobs:
       - name: Store credentials (early)
         env:
           CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
-          DATABASE_NAME: ${{ steps.parse.outputs.database_name }}
+          DATABASE_NAME: ${{ steps.parse.outputs.credential_database_name }}
           LEAGUE_ID: ${{ steps.parse.outputs.league_id }}
           LEAGUE_NAME: ${{ steps.parse.outputs.league_name }}
         run: |
@@ -668,7 +668,7 @@ jobs:
         if: always()
         env:
           CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
-          DATABASE_NAME: ${{ steps.parse.outputs.database_name }}
+          DATABASE_NAME: ${{ steps.parse.outputs.credential_database_name }}
           LEAGUE_ID: ${{ steps.parse.outputs.league_id }}
           LEAGUE_NAME: ${{ steps.parse.outputs.league_name }}
         run: |
