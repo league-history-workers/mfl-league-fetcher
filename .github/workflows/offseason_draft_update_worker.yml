@@ -35,6 +35,16 @@ on:
         description: 'Optional maximum number of leagues to check'
         required: false
         type: string
+      shard_index:
+        description: 'Zero-based context shard index for a fleet sweep'
+        required: true
+        type: string
+        default: '0'
+      shard_count:
+        description: 'Total context shards for a fleet sweep'
+        required: true
+        type: string
+        default: '1'
       api_retries:
         description: 'API fetch attempts per league'
         required: true
@@ -139,6 +149,8 @@ jobs:
           EXECUTE: ${{ inputs.execute }}
           ALLOW_INCOMPLETE_DRAFT: ${{ inputs.allow_incomplete_draft }}
           LIMIT: ${{ inputs.limit }}
+          SHARD_INDEX: ${{ inputs.shard_index }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
           API_RETRIES: ${{ inputs.api_retries }}
           SKIP_SQL_ENRICHMENTS: ${{ inputs.skip_sql_enrichments }}
           INCLUDE_OPS_ENRICHMENTS: ${{ inputs.include_ops_enrichments }}
@@ -147,7 +159,7 @@ jobs:
           SKIP_HOMEPAGE: ${{ inputs.skip_homepage }}
         run: |
           set -euo pipefail
-          args=(--platform "${PLATFORM}" --api-retries "${API_RETRIES}" --json-out offseason_draft_results.json)
+          args=(--platform "${PLATFORM}" --api-retries "${API_RETRIES}" --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" --json-out offseason_draft_results.json)
           if [ -n "${DRAFT_YEAR}" ]; then
             args+=(--draft-year "${DRAFT_YEAR}")
           fi
