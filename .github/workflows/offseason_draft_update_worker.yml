@@ -21,8 +21,17 @@ on:
         description: 'Optional draft year override, e.g. 2026'
         required: false
         type: string
+      league_id:
+        description: 'Optional current-season platform league id/key for one db_name'
+        required: false
+        type: string
       execute:
         description: 'Apply changed/missing draft updates'
+        required: true
+        type: boolean
+        default: false
+      force:
+        description: 'Run the scoped refresh even when the draft source fingerprint is unchanged'
         required: true
         type: boolean
         default: false
@@ -102,6 +111,7 @@ jobs:
       YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
       YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
       CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
+      OPS_CACHE_PATH: ${{ github.workspace }}/research_public_lake/ops_cache.duckdb
 
     steps:
       - name: Checkout code
@@ -123,6 +133,16 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+
+      - name: Restore canonical research ops cache
+        id: research-lake
+        uses: ./.github/actions/restore-research-ops-cache
+        with:
+          cache-key: research-public-lake-v5-Linux-2000-plus-player-bio
+          release-tag: ops-cache-v6-2000-plus-player-bio
+
+      - name: Verify ops cache
+        run: test -s "${OPS_CACHE_PATH}"
 
       - name: Cache Python virtualenv
         uses: actions/cache@v5
@@ -150,7 +170,9 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           DB_NAMES: ${{ inputs.db_names }}
           DRAFT_YEAR: ${{ inputs.draft_year }}
+          LEAGUE_ID: ${{ inputs.league_id }}
           EXECUTE: ${{ inputs.execute }}
+          FORCE: ${{ inputs.force }}
           ALLOW_INCOMPLETE_DRAFT: ${{ inputs.allow_incomplete_draft }}
           LIMIT: ${{ inputs.limit }}
           SHARD_INDEX: ${{ inputs.shard_index }}
@@ -167,11 +189,17 @@ jobs:
           if [ -n "${DRAFT_YEAR}" ]; then
             args+=(--draft-year "${DRAFT_YEAR}")
           fi
+          if [ -n "${LEAGUE_ID}" ]; then
+            args+=(--league-id "${LEAGUE_ID}")
+          fi
           if [ -n "${LIMIT}" ]; then
             args+=(--limit "${LIMIT}")
           fi
           if [ "${EXECUTE}" = "true" ]; then
             args+=(--execute)
+          fi
+          if [ "${FORCE}" = "true" ]; then
+            args+=(--force)
           fi
           if [ "${ALLOW_INCOMPLETE_DRAFT}" = "true" ]; then
             args+=(--allow-incomplete-draft)
