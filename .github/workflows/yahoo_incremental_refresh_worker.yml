@@ -1,0 +1,161 @@
+name: Yahoo Active-Season Refresh Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_name:
+        description: 'Existing Yahoo league db_name to refresh'
+        required: true
+        type: string
+      year:
+        description: 'Optional active NFL season override, e.g. 2026'
+        required: false
+        type: string
+      through_week:
+        description: 'Optional finalized-week ceiling, e.g. 1'
+        required: false
+        type: string
+      execute:
+        description: 'Publish the scoped active-season refresh to Fly (false is read-only)'
+        required: true
+        type: boolean
+        default: false
+      yahoo_oauth_ref:
+        description: 'yahoo_oauth branch/ref to check out'
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yahoo-active-season-refresh-${{ inputs.db_name }}
+  cancel-in-progress: false
+
+jobs:
+  yahoo-active-season-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      PYTHONUNBUFFERED: 1
+      DATABASE_BACKEND: fly
+      DATABASE_SERVER_URL: ${{ secrets.DATABASE_SERVER_URL }}
+      DATABASE_READ_TOKEN: ${{ secrets.DATABASE_READ_TOKEN }}
+      DATABASE_ADMIN_TOKEN: ${{ secrets.DATABASE_ADMIN_TOKEN }}
+      YAHOO_CLIENT_ID: ${{ secrets.YAHOO_CLIENT_ID }}
+      YAHOO_CLIENT_SECRET: ${{ secrets.YAHOO_CLIENT_SECRET }}
+      CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.CREDENTIAL_ENCRYPTION_KEY }}
+      OPS_CACHE_PATH: ${{ github.workspace }}/research_public_lake/ops_cache.duckdb
+
+    steps:
+      - name: Checkout Yahoo application code
+        uses: actions/checkout@v5
+        with:
+          repository: jeleff1000/yahoo_oauth
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          ref: ${{ inputs.yahoo_oauth_ref || 'main' }}
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /fantasy_football_data_scripts/
+            /scripts/
+            /requirements.txt
+            /pyproject.toml
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Restore canonical research ops cache
+        uses: ./.github/actions/restore-research-ops-cache
+        with:
+          cache-key: research-public-lake-v5-Linux-2000-plus-player-bio
+          release-tag: ops-cache-v6-2000-plus-player-bio
+
+      - name: Verify ops cache
+        run: test -s "${OPS_CACHE_PATH}"
+
+      - name: Cache Python virtualenv
+        uses: actions/cache@v5
+        id: cache-venv
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.11-${{ hashFiles('requirements.txt') }}
+
+      - name: Create virtualenv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: python -m venv .venv
+
+      - name: Install dependencies
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Activate virtualenv
+        run: echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Refresh Yahoo active season
+        env:
+          DB_NAME: ${{ inputs.db_name }}
+          YEAR: ${{ inputs.year }}
+          THROUGH_WEEK: ${{ inputs.through_week }}
+          EXECUTE: ${{ inputs.execute }}
+        run: |
+          set -euo pipefail
+          args=(--db "${DB_NAME}" --json-out yahoo_active_season_refresh.json)
+          if [ -n "${YEAR}" ]; then
+            args+=(--year "${YEAR}")
+          fi
+          if [ -n "${THROUGH_WEEK}" ]; then
+            args+=(--through-week "${THROUGH_WEEK}")
+          fi
+          if [ "${EXECUTE}" = "true" ]; then
+            args+=(--execute)
+          fi
+          python scripts/refresh_yahoo_active_season.py "${args[@]}"
+
+      - name: Upload refresh receipt
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: yahoo-active-season-refresh-${{ github.run_id }}
+          path: yahoo_active_season_refresh.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "# Yahoo Active-Season Refresh" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f yahoo_active_season_refresh.json ]; then
+            python - <<'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          with open("yahoo_active_season_refresh.json", encoding="utf-8") as handle:
+              receipt = json.load(handle)
+
+          print(f"- **League:** `{receipt.get('db_name', 'unknown')}`")
+          print(f"- **Year:** `{receipt.get('year', 'unknown')}`")
+          print(f"- **Weeks:** `{receipt.get('refresh_weeks', [])}`")
+          print(f"- **Status:** `{receipt.get('status', 'missing receipt')}`")
+          print(f"- **Execute:** `{receipt.get('executed', False)}`")
+          print("")
+          print("## Provider rows")
+          for name, count in sorted((receipt.get("fetch_rows") or {}).items()):
+              print(f"- `{name}`: {count}")
+          if receipt.get("published_tables"):
+              print("")
+              print("## Published tables")
+              for table_name in receipt["published_tables"]:
+                  print(f"- `{table_name}`")
+          PYEOF
+          else
+            echo "No receipt was written; inspect the failed worker step." >> "$GITHUB_STEP_SUMMARY"
+          fi
