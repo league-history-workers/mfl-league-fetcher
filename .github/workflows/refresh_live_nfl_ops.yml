@@ -5,6 +5,14 @@ name: Refresh Live NFL Ops
 # any league table. Promotion is opt-in after the local eight-table artifact
 # passes its receipt and schema gates.
 on:
+  # GitHub Actions cron is UTC.  These are 03:00 America/New_York through the
+  # 2026 regular season and the January/February 2027 postseason window.
+  # The scope resolver below makes off-days a read-only no-op before artifacts
+  # or Fly are contacted.
+  schedule:
+    - cron: "0 7 * 9,10 *"
+    - cron: "0 8 * 11,12 *"
+    - cron: "0 8 * 1,2 *"
   workflow_dispatch:
     inputs:
       year:
@@ -13,9 +21,22 @@ on:
         default: "2026"
         type: string
       week:
-        description: NFL week to refresh (only scored REG games are admitted)
+        description: NFL week to refresh
         required: true
         default: "1"
+        type: string
+      season_type:
+        description: REG or POST scope for a manual refresh
+        required: true
+        default: REG
+        type: choice
+        options:
+          - REG
+          - POST
+      game_date:
+        description: Optional YYYY-MM-DD constraint for a manual refresh
+        required: false
+        default: ""
         type: string
       apply:
         description: Atomically replace ___ops_nfl after local validation
@@ -43,7 +64,7 @@ jobs:
     timeout-minutes: 180
     env:
       OPS_REPOSITORY: ${{ github.repository }}
-      BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag }}
+      BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag || 'ops-nfl-live-current' }}
       GH_TOKEN: ${{ github.token }}
       BASELINE_PATH: ${{ github.workspace }}/baseline/ops_nfl.duckdb
       OUTPUT_PATH: ${{ github.workspace }}/output/ops_nfl.duckdb
@@ -64,7 +85,73 @@ jobs:
       - name: Install refresh dependencies
         run: python -m pip install --disable-pip-version-check pandas duckdb pyarrow requests
 
+      - name: Resolve final live refresh scope
+        id: scope
+        working-directory: code
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_YEAR: ${{ inputs.year || '2026' }}
+          MANUAL_WEEK: ${{ inputs.week || '1' }}
+          MANUAL_SEASON_TYPE: ${{ inputs.season_type || 'REG' }}
+          MANUAL_GAME_DATE: ${{ inputs.game_date || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            game_date=$(TZ=America/New_York date --date=yesterday +%F)
+            python scripts/discover_live_nfl_ops_refresh.py \
+              --season 2026 \
+              --game-date "$game_date" \
+              --output refresh_scope.json
+          else
+            jq -n \
+              --argjson year "$MANUAL_YEAR" \
+              --argjson week "$MANUAL_WEEK" \
+              --arg season_type "$MANUAL_SEASON_TYPE" \
+              --arg game_date "$MANUAL_GAME_DATE" \
+              '{
+                status: "ready",
+                game_date: (if $game_date == "" then null else $game_date end),
+                scope: {
+                  year: $year,
+                  week: $week,
+                  season_type: $season_type,
+                  game_date: (if $game_date == "" then null else $game_date end)
+                }
+              }' > refresh_scope.json
+          fi
+
+          status=$(jq -r '.status' refresh_scope.json)
+          if [[ "$status" == "ready" ]]; then
+            test "$(jq -r '.scope | type' refresh_scope.json)" == "object"
+            echo "should_refresh=true" >> "$GITHUB_OUTPUT"
+            echo "refresh_year=$(jq -r '.scope.year' refresh_scope.json)" >> "$GITHUB_OUTPUT"
+            echo "refresh_week=$(jq -r '.scope.week' refresh_scope.json)" >> "$GITHUB_OUTPUT"
+            echo "refresh_season_type=$(jq -r '.scope.season_type' refresh_scope.json)" >> "$GITHUB_OUTPUT"
+            echo "refresh_game_date=$(jq -r '.scope.game_date // empty' refresh_scope.json)" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" == "no-op" ]]; then
+            test "$(jq -r '.scope' refresh_scope.json)" == "null"
+            echo "should_refresh=false" >> "$GITHUB_OUTPUT"
+            echo "refresh_year=" >> "$GITHUB_OUTPUT"
+            echo "refresh_week=" >> "$GITHUB_OUTPUT"
+            echo "refresh_season_type=" >> "$GITHUB_OUTPUT"
+            echo "refresh_game_date=" >> "$GITHUB_OUTPUT"
+          else
+            echo "unexpected refresh scope status: $status" >&2
+            exit 1
+          fi
+
+      - name: Upload refresh scope receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-nfl-ops-scope-${{ github.run_id }}
+          path: code/refresh_scope.json
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Reconstruct and verify the durable baseline
+        if: ${{ steps.scope.outputs.should_refresh == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,6 +171,7 @@ jobs:
           rm -rf parts
 
       - name: Build and verify the local eight-table candidate
+        if: ${{ steps.scope.outputs.should_refresh == 'true' }}
         working-directory: code
         env:
           PYTHONPATH: ${{ github.workspace }}/code/fantasy_football_data_scripts
@@ -91,14 +179,20 @@ jobs:
           TMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          python scripts/refresh_live_nfl_ops.py \
-            --base "$BASELINE_PATH" \
-            --output "$OUTPUT_PATH" \
-            --year "${{ inputs.year }}" \
-            --week "${{ inputs.week }}"
+          refresh_args=(
+            --base "$BASELINE_PATH"
+            --output "$OUTPUT_PATH"
+            --year "${{ steps.scope.outputs.refresh_year }}"
+            --week "${{ steps.scope.outputs.refresh_week }}"
+            --season-type "${{ steps.scope.outputs.refresh_season_type }}"
+          )
+          if [[ -n "${{ steps.scope.outputs.refresh_game_date }}" ]]; then
+            refresh_args+=(--game-date "${{ steps.scope.outputs.refresh_game_date }}")
+          fi
+          python scripts/refresh_live_nfl_ops.py "${refresh_args[@]}"
 
       - name: Publish the verified candidate as the next durable baseline
-        if: ${{ inputs.apply }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +218,7 @@ jobs:
             publish/ops_nfl.duckdb.sha256 --repo "$OPS_REPOSITORY"
 
       - name: Atomically promote the verified ops artifact
-        if: ${{ inputs.apply }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
         working-directory: code
         env:
           PYTHONPATH: ${{ github.workspace }}/code:${{ github.workspace }}/code/fantasy_football_data_scripts
@@ -155,10 +249,10 @@ jobs:
           PY
 
       - name: Upload the local validation receipt
-        if: ${{ always() }}
+        if: ${{ always() && steps.scope.outputs.should_refresh == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: live-nfl-ops-receipt-${{ inputs.year }}-w${{ inputs.week }}-${{ github.run_id }}
+          name: live-nfl-ops-receipt-${{ steps.scope.outputs.refresh_year }}-w${{ steps.scope.outputs.refresh_week }}-${{ github.run_id }}
           path: output/ops_nfl.manifest.json
           if-no-files-found: warn
           retention-days: 30
