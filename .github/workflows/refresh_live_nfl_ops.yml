@@ -1,0 +1,160 @@
+name: Refresh Live NFL Ops
+
+# Track 1 only: this workflow builds a complete local ___ops_nfl replacement
+# from finalized NFLverse data. It never imports, reads, writes, or rebuilds
+# any league table. Promotion is opt-in after the local eight-table artifact
+# passes its receipt and schema gates.
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: NFL season to refresh
+        required: true
+        default: "2026"
+        type: string
+      week:
+        description: NFL week to refresh (only scored REG games are admitted)
+        required: true
+        default: "1"
+        type: string
+      apply:
+        description: Atomically replace ___ops_nfl after local validation
+        required: true
+        default: false
+        type: boolean
+      baseline_release_tag:
+        description: Durable release holding the complete pre-refresh ___ops_nfl baseline
+        required: true
+        default: ops-nfl-live-current
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-nfl-ops-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OPS_REPOSITORY: jeleff1000/yahoo_oauth
+      BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag }}
+      GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+      BASELINE_PATH: ${{ github.workspace }}/baseline/ops_nfl.duckdb
+      OUTPUT_PATH: ${{ github.workspace }}/output/ops_nfl.duckdb
+
+    steps:
+      - name: Checkout pipeline source
+        uses: actions/checkout@v5
+        with:
+          repository: jeleff1000/yahoo_oauth
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: code
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install refresh dependencies
+        run: python -m pip install --disable-pip-version-check pandas duckdb pyarrow requests
+
+      - name: Reconstruct and verify the durable baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p baseline parts
+          gh release download "$BASELINE_RELEASE_TAG" \
+            --repo "$OPS_REPOSITORY" \
+            --pattern 'ops_nfl.duckdb.part-*' \
+            --dir parts
+          gh release download "$BASELINE_RELEASE_TAG" \
+            --repo "$OPS_REPOSITORY" \
+            --pattern 'ops_nfl.duckdb.sha256' \
+            --dir baseline
+          mapfile -t part_files < <(find parts -maxdepth 1 -type f -name 'ops_nfl.duckdb.part-*' | LC_ALL=C sort)
+          test "${#part_files[@]}" -gt 0
+          cat "${part_files[@]}" > "$BASELINE_PATH"
+          (cd baseline && sha256sum --check ops_nfl.duckdb.sha256)
+          rm -rf parts
+
+      - name: Build and verify the local eight-table candidate
+        working-directory: code
+        env:
+          PYTHONPATH: ${{ github.workspace }}/code/fantasy_football_data_scripts
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python scripts/refresh_live_nfl_ops.py \
+            --base "$BASELINE_PATH" \
+            --output "$OUTPUT_PATH" \
+            --year "${{ inputs.year }}" \
+            --week "${{ inputs.week }}"
+
+      - name: Publish the verified candidate as the next durable baseline
+        if: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          split --bytes=1800M --numeric-suffixes=0 --suffix-length=2 \
+            "$OUTPUT_PATH" publish/ops_nfl.duckdb.part-
+          sha256sum "$OUTPUT_PATH" > publish/ops_nfl.duckdb.sha256
+          if gh release view "$BASELINE_RELEASE_TAG" --repo "$OPS_REPOSITORY" >/dev/null 2>&1; then
+            release_id=$(gh release view "$BASELINE_RELEASE_TAG" --repo "$OPS_REPOSITORY" --json id --jq .id)
+            while read -r asset_id; do
+              test -z "$asset_id" || gh api --method DELETE \
+                "repos/$OPS_REPOSITORY/releases/assets/$asset_id"
+            done < <(gh api --paginate "repos/$OPS_REPOSITORY/releases/$release_id/assets" \
+              --jq '.[] | select(.name == "ops_nfl.duckdb.sha256" or (.name | startswith("ops_nfl.duckdb.part-"))) | .id')
+          else
+            gh release create "$BASELINE_RELEASE_TAG" --repo "$OPS_REPOSITORY" \
+              --target main --title "Current live NFL ops baseline" \
+              --notes "Verified full ___ops_nfl baseline for the live refresh worker."
+          fi
+          gh release upload "$BASELINE_RELEASE_TAG" publish/ops_nfl.duckdb.part-* \
+            publish/ops_nfl.duckdb.sha256 --repo "$OPS_REPOSITORY"
+
+      - name: Atomically promote the verified ops artifact
+        if: ${{ inputs.apply }}
+        working-directory: code
+        env:
+          PYTHONPATH: ${{ github.workspace }}/code:${{ github.workspace }}/code/fantasy_football_data_scripts
+          DATABASE_BACKEND: fly
+          DATABASE_SERVER_URL: ${{ secrets.DATABASE_SERVER_URL }}
+          DATABASE_READ_TOKEN: ${{ secrets.DATABASE_READ_TOKEN }}
+          DATABASE_ADMIN_TOKEN: ${{ secrets.DATABASE_ADMIN_TOKEN }}
+          FLY_PRIMARY_MACHINE_ID: ${{ secrets.FLY_PRIMARY_MACHINE_ID }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from scripts.refresh_live_nfl_ops import promote_complete_artifact
+
+          output = Path(os.environ["OUTPUT_PATH"])
+          baseline = Path(os.environ["BASELINE_PATH"])
+          receipt = json.loads(output.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+          promote_complete_artifact(
+              output,
+              baseline,
+              receipt["table_counts"],
+              receipt["schema_columns"],
+          )
+          PY
+
+      - name: Upload the local validation receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-nfl-ops-receipt-${{ inputs.year }}-w${{ inputs.week }}-${{ github.run_id }}
+          path: output/ops_nfl.manifest.json
+          if-no-files-found: warn
+          retention-days: 30
