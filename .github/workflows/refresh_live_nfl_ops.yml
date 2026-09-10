@@ -29,7 +29,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # The durable baseline lives in this worker repository, so the scoped
+  # workflow token can replace only these release assets.
+  contents: write
 
 concurrency:
   group: live-nfl-ops-refresh
@@ -40,9 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      OPS_REPOSITORY: jeleff1000/yahoo_oauth
+      OPS_REPOSITORY: ${{ github.repository }}
       BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag }}
-      GH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+      GH_TOKEN: ${{ github.token }}
       BASELINE_PATH: ${{ github.workspace }}/baseline/ops_nfl.duckdb
       OUTPUT_PATH: ${{ github.workspace }}/output/ops_nfl.duckdb
 
