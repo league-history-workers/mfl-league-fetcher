@@ -105,7 +105,9 @@ jobs:
             "$OUTPUT_PATH" publish/ops_nfl.duckdb.part-
           sha256sum "$OUTPUT_PATH" > publish/ops_nfl.duckdb.sha256
           if gh release view "$BASELINE_RELEASE_TAG" --repo "$OPS_REPOSITORY" >/dev/null 2>&1; then
-            release_id=$(gh release view "$BASELINE_RELEASE_TAG" --repo "$OPS_REPOSITORY" --json id --jq .id)
+            # `gh release view --json id` returns a GraphQL node ID.  The
+            # REST asset-list endpoint needs the numeric REST release ID.
+            release_id=$(gh api "repos/$OPS_REPOSITORY/releases/tags/$BASELINE_RELEASE_TAG" --jq .id)
             while read -r asset_id; do
               test -z "$asset_id" || gh api --method DELETE \
                 "repos/$OPS_REPOSITORY/releases/assets/$asset_id"
