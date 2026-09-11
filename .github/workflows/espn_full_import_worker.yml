@@ -236,39 +236,24 @@ jobs:
 
           echo "No ESPN cookies in payload — retrieving from Fly..."
           python - <<'PYEOF'
-          import json, os, sys, urllib.request
-          from cryptography.fernet import Fernet
+          import os
+          import sys
 
           db_name = "${{ steps.parse.outputs.database_name }}"
-          enc_key = os.environ.get('CREDENTIAL_ENCRYPTION_KEY', '')
-          if not enc_key:
+          if not os.environ.get('CREDENTIAL_ENCRYPTION_KEY', ''):
               print("WARNING: CREDENTIAL_ENCRYPTION_KEY not set")
-              sys.exit(0)
+              sys.exit(1)
 
-          def fly_query(sql, database="___ops"):
-              url = os.environ["DATABASE_SERVER_URL"].rstrip("/") + "/query"
-              token = os.environ["DATABASE_READ_TOKEN"]
-              data = json.dumps({"sql": sql, "database": database}).encode()
-              req = urllib.request.Request(url, data=data, headers={
-                  "Content-Type": "application/json",
-                  "Authorization": f"Bearer {token}",
-              })
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.loads(resp.read())
+          sys.path.insert(0, 'fantasy_football_data_scripts')
+          from multi_league.utils.credential_store import retrieve_espn_credentials
 
-          safe_db = db_name.replace("'", "''")
-          rows = fly_query(f"SELECT encrypted_espn_s2, encrypted_swid FROM main.espn_leagues WHERE database_name = '{safe_db}'")
+          credentials = retrieve_espn_credentials(db_name)
+          if not credentials or not credentials.get('espn_s2') or not credentials.get('swid'):
+              print(f"Stored ESPN cookies were unavailable for {db_name} after the retrying Fly credential read")
+              sys.exit(1)
 
-          if not rows or not rows[0].get('encrypted_espn_s2'):
-              print(f"No stored cookies for {db_name}")
-              sys.exit(0)
-
-          f = Fernet(enc_key.encode())
-          espn_s2 = f.decrypt(rows[0]['encrypted_espn_s2'].encode()).decode()
-          swid = f.decrypt(rows[0]['encrypted_swid'].encode()).decode()
-
-          with open(".espn_s2", "w") as fh: fh.write(espn_s2)
-          with open(".espn_swid", "w") as fh: fh.write(swid)
+          with open(".espn_s2", "w") as fh: fh.write(credentials['espn_s2'])
+          with open(".espn_swid", "w") as fh: fh.write(credentials['swid'])
           print(f"Retrieved ESPN cookies for {db_name}")
           PYEOF
 
