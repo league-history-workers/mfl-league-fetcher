@@ -44,3 +44,15 @@ def test_live_nfl_ops_workflow_gates_release_and_fly_on_a_ready_scope():
     assert "github.event_name == 'schedule'" in steps_by_name[
         "Atomically promote the verified ops artifact"
     ]["if"]
+
+
+def test_durable_baseline_checksum_uses_the_reconstructed_artifact_path() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    # Release manifests retain the original output/ops_nfl.duckdb filename.
+    # The verifier must compare that digest with the reconstructed baseline,
+    # rather than asking sha256sum to find the old filename locally.
+    assert 'expected_hash=$(awk \'{print $1}\' baseline/ops_nfl.duckdb.sha256)' in text
+    assert 'actual_hash=$(sha256sum "$BASELINE_PATH" | awk \'{print $1}\')' in text
+    assert "durable baseline SHA-256 mismatch" in text
+    assert "(cd baseline && sha256sum --check ops_nfl.duckdb.sha256)" not in text

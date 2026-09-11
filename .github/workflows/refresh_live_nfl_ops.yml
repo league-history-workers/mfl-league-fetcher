@@ -167,7 +167,16 @@ jobs:
           mapfile -t part_files < <(find parts -maxdepth 1 -type f -name 'ops_nfl.duckdb.part-*' | LC_ALL=C sort)
           test "${#part_files[@]}" -gt 0
           cat "${part_files[@]}" > "$BASELINE_PATH"
-          (cd baseline && sha256sum --check ops_nfl.duckdb.sha256)
+          # The release manifest retains the artifact's original
+          # output/ops_nfl.duckdb filename. Compare its digest to the file we
+          # just reconstructed at BASELINE_PATH instead of resolving that old
+          # filename relative to the runner workspace.
+          expected_hash=$(awk '{print $1}' baseline/ops_nfl.duckdb.sha256)
+          actual_hash=$(sha256sum "$BASELINE_PATH" | awk '{print $1}')
+          if [[ -z "$expected_hash" || "$actual_hash" != "$expected_hash" ]]; then
+            echo "::error::durable baseline SHA-256 mismatch"
+            exit 1
+          fi
           rm -rf parts
 
       - name: Build and verify the local eight-table candidate
