@@ -1,0 +1,45 @@
+name: Deploy NFL Ops Scheduler
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      WORKERS_DISPATCH_TOKEN: ${{ secrets.PRIVATE_REPO_PAT }}
+      APP_NAME: league-history-nfl-ops-scheduler
+      REGION: iad
+      VOLUME_NAME: nfl_ops_scheduler_state
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Create the isolated scheduler app and state volume
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! flyctl status --app "$APP_NAME" >/dev/null 2>&1; then
+            flyctl apps create "$APP_NAME" --yes
+          fi
+          if ! flyctl volumes list --app "$APP_NAME" --json | jq -e --arg name "$VOLUME_NAME" \
+            'any(.[]; (.name // .Name) == $name)' >/dev/null; then
+            flyctl volumes create "$VOLUME_NAME" --app "$APP_NAME" --region "$REGION" --size 1 --yes
+          fi
+
+      - name: Install the Workers dispatch secret
+        run: flyctl secrets set --app "$APP_NAME" WORKERS_DISPATCH_TOKEN="$WORKERS_DISPATCH_TOKEN"
+
+      - name: Deploy and verify the scheduler
+        run: |
+          set -euo pipefail
+          cd nfl_ops_scheduler
+          flyctl deploy --app "$APP_NAME" --config fly.toml --remote-only
+          flyctl scale count 1 --process-group scheduler --app "$APP_NAME" --yes
+          flyctl status --app "$APP_NAME"

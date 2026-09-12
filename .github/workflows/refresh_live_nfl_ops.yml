@@ -1,18 +1,18 @@
 name: Refresh Live NFL Ops
+run-name: >-
+  Refresh Live NFL Ops — ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.game_date || inputs.game_date || 'manual' }}
 
 # Track 1 only: this workflow builds a complete local ___ops_nfl replacement
 # from finalized NFLverse data. It never imports, reads, writes, or rebuilds
 # any league table. Promotion is opt-in after the local eight-table artifact
 # passes its receipt and schema gates.
 on:
-  # GitHub Actions cron is UTC.  These are 03:00 America/New_York through the
-  # 2026 regular season and the January/February 2027 postseason window.
-  # The scope resolver below makes off-days a read-only no-op before artifacts
-  # or Fly are contacted.
-  schedule:
-    - cron: "0 7 * 9,10 *"
-    - cron: "0 8 * 11,12 *"
-    - cron: "0 8 * 1,2 *"
+  # A dedicated Fly scheduler dispatches this event at 03:00 Eastern (with a
+  # tightly bounded restart-recovery window) after it proves that the preceding
+  # day has a finalized NFL game. Do not add a GitHub `schedule`: it can be
+  # delayed for hours at the top of an hour.
+  repository_dispatch:
+    types: [refresh-live-nfl-ops]
   workflow_dispatch:
     inputs:
       year:
@@ -91,17 +91,20 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SEASON: ${{ github.event.client_payload.season || '' }}
+          DISPATCH_GAME_DATE: ${{ github.event.client_payload.game_date || '' }}
           MANUAL_YEAR: ${{ inputs.year || '2026' }}
           MANUAL_WEEK: ${{ inputs.week || '1' }}
           MANUAL_SEASON_TYPE: ${{ inputs.season_type || 'REG' }}
           MANUAL_GAME_DATE: ${{ inputs.game_date || '' }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == "schedule" ]]; then
-            game_date=$(TZ=America/New_York date --date=yesterday +%F)
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            test "$DISPATCH_SEASON" = "2026"
+            test -n "$DISPATCH_GAME_DATE"
             python scripts/discover_live_nfl_ops_refresh.py \
               --season 2026 \
-              --game-date "$game_date" \
+              --game-date "$DISPATCH_GAME_DATE" \
               --output refresh_scope.json
           else
             jq -n \
@@ -201,7 +204,7 @@ jobs:
           python scripts/refresh_live_nfl_ops.py "${refresh_args[@]}"
 
       - name: Publish the verified candidate as the next durable baseline
-        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'repository_dispatch' || inputs.apply) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -227,7 +230,7 @@ jobs:
             publish/ops_nfl.duckdb.sha256 --repo "$OPS_REPOSITORY"
 
       - name: Atomically promote the verified ops artifact
-        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'repository_dispatch' || inputs.apply) }}
         working-directory: code
         env:
           PYTHONPATH: ${{ github.workspace }}/code:${{ github.workspace }}/code/fantasy_football_data_scripts
