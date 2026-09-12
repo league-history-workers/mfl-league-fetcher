@@ -1,18 +1,20 @@
 name: Refresh Live NFL Ops
 run-name: >-
-  Refresh Live NFL Ops — ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.game_date || inputs.game_date || 'manual' }}
+  Refresh Live NFL Ops — ${{ github.event_name == 'schedule' && 'scheduled' || inputs.game_date || 'manual' }}
 
 # Track 1 only: this workflow builds a complete local ___ops_nfl replacement
 # from finalized NFLverse data. It never imports, reads, writes, or rebuilds
 # any league table. Promotion is opt-in after the local eight-table artifact
 # passes its receipt and schema gates.
 on:
-  # A dedicated Fly scheduler dispatches this event at 03:00 Eastern (with a
-  # tightly bounded restart-recovery window) after it proves that the preceding
-  # day has a finalized NFL game. Do not add a GitHub `schedule`: it can be
-  # delayed for hours at the top of an hour.
-  repository_dispatch:
-    types: [refresh-live-nfl-ops]
+  # Start at 02:30 Eastern, an off-peak GitHub Actions minute, and the first
+  # runner step holds the data refresh to 03:00 Eastern. This avoids the known
+  # top-of-hour schedule delay without moving the worker or Fly promotion out
+  # of GitHub Actions. The NFLverse scope gate makes off-days read-only no-ops.
+  schedule:
+    - cron: "30 6 * 9,10 *"
+    - cron: "30 7 * 11,12 *"
+    - cron: "30 7 * 1,2 *"
   workflow_dispatch:
     inputs:
       year:
@@ -61,7 +63,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 225
     env:
       OPS_REPOSITORY: ${{ github.repository }}
       BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag || 'ops-nfl-live-current' }}
@@ -70,7 +72,40 @@ jobs:
       OUTPUT_PATH: ${{ github.workspace }}/output/ops_nfl.duckdb
 
     steps:
+      - name: Hold scheduled refresh until 03:00 Eastern
+        id: boundary
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          DUE_WINDOW_MINUTES = 5
+          eastern = ZoneInfo("America/New_York")
+          now = datetime.now(eastern)
+          if os.environ["EVENT_NAME"] != "schedule":
+              should_run = True
+          else:
+              target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+              if now < target:
+                  time.sleep((target - now).total_seconds())
+                  now = datetime.now(eastern)
+              should_run = now < target + timedelta(minutes=DUE_WINDOW_MINUTES)
+              if not should_run:
+                  print(
+                      "Scheduled run started outside the 03:00-03:04 Eastern "
+                      "refresh window; exiting before source checkout or Fly access."
+                  )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"should_run={'true' if should_run else 'false'}\\n")
+          PY
+
       - name: Checkout pipeline source
+        if: ${{ steps.boundary.outputs.should_run == 'true' }}
         uses: actions/checkout@v5
         with:
           repository: jeleff1000/yahoo_oauth
@@ -78,33 +113,33 @@ jobs:
           path: code
 
       - name: Set up Python
+        if: ${{ steps.boundary.outputs.should_run == 'true' }}
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install refresh dependencies
+        if: ${{ steps.boundary.outputs.should_run == 'true' }}
         run: python -m pip install --disable-pip-version-check pandas duckdb pyarrow requests
 
       - name: Resolve final live refresh scope
         id: scope
+        if: ${{ steps.boundary.outputs.should_run == 'true' }}
         working-directory: code
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          DISPATCH_SEASON: ${{ github.event.client_payload.season || '' }}
-          DISPATCH_GAME_DATE: ${{ github.event.client_payload.game_date || '' }}
           MANUAL_YEAR: ${{ inputs.year || '2026' }}
           MANUAL_WEEK: ${{ inputs.week || '1' }}
           MANUAL_SEASON_TYPE: ${{ inputs.season_type || 'REG' }}
           MANUAL_GAME_DATE: ${{ inputs.game_date || '' }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
-            test "$DISPATCH_SEASON" = "2026"
-            test -n "$DISPATCH_GAME_DATE"
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            game_date=$(TZ=America/New_York date --date=yesterday +%F)
             python scripts/discover_live_nfl_ops_refresh.py \
               --season 2026 \
-              --game-date "$DISPATCH_GAME_DATE" \
+              --game-date "$game_date" \
               --output refresh_scope.json
           else
             jq -n \
@@ -145,7 +180,7 @@ jobs:
           fi
 
       - name: Upload refresh scope receipt
-        if: ${{ always() }}
+        if: ${{ always() && steps.boundary.outputs.should_run == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: live-nfl-ops-scope-${{ github.run_id }}
@@ -204,7 +239,7 @@ jobs:
           python scripts/refresh_live_nfl_ops.py "${refresh_args[@]}"
 
       - name: Publish the verified candidate as the next durable baseline
-        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'repository_dispatch' || inputs.apply) }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -230,7 +265,7 @@ jobs:
             publish/ops_nfl.duckdb.sha256 --repo "$OPS_REPOSITORY"
 
       - name: Atomically promote the verified ops artifact
-        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'repository_dispatch' || inputs.apply) }}
+        if: ${{ steps.scope.outputs.should_refresh == 'true' && (github.event_name == 'schedule' || inputs.apply) }}
         working-directory: code
         env:
           PYTHONPATH: ${{ github.workspace }}/code:${{ github.workspace }}/code/fantasy_football_data_scripts

@@ -4,32 +4,22 @@ import yaml
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "refresh_live_nfl_ops.yml"
-DEPLOY_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy_nfl_ops_scheduler.yml"
-SCHEDULER_DOCKERFILE = Path(__file__).resolve().parents[1] / "nfl_ops_scheduler" / "Dockerfile"
 
 
-def test_live_nfl_ops_workflow_is_dispatch_only_and_never_uses_github_cron():
+def test_live_nfl_ops_workflow_uses_an_early_github_schedule_and_no_external_dispatcher():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     triggers = workflow[True]
 
     assert "workflow_dispatch" in triggers
-    assert "repository_dispatch" in triggers
-    assert "schedule" not in triggers
+    assert triggers["schedule"] == [
+        {"cron": "30 6 * 9,10 *"},
+        {"cron": "30 7 * 11,12 *"},
+        {"cron": "30 7 * 1,2 *"},
+    ]
+    assert "repository_dispatch" not in triggers
     assert "push" not in triggers
     assert "workflow_run" not in triggers
-    assert "github.event.client_payload.game_date" in workflow["run-name"]
-
-
-def test_scheduler_deployment_has_a_pinned_action_and_a_matching_build_context():
-    deploy_text = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
-    dockerfile = SCHEDULER_DOCKERFILE.read_text(encoding="utf-8")
-
-    assert "superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1" in deploy_text
-    assert "setup-flyctl@master" not in deploy_text
-    assert "cd nfl_ops_scheduler" in deploy_text
-    assert "COPY requirements.txt ./requirements.txt" in dockerfile
-    assert "COPY scheduler.py ./scheduler.py" in dockerfile
-    assert "COPY nfl_ops_scheduler/" not in dockerfile
+    assert "scheduled" in workflow["run-name"]
 
 
 def test_live_nfl_ops_workflow_gates_release_and_fly_on_a_ready_scope():
@@ -39,8 +29,14 @@ def test_live_nfl_ops_workflow_gates_release_and_fly_on_a_ready_scope():
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "discover_live_nfl_ops_refresh.py" in text
-    assert "github.event.client_payload.game_date" in text
+    assert "Hold scheduled refresh until 03:00 Eastern" in text
+    assert "DUE_WINDOW_MINUTES = 5" in text
+    assert "game_date=$(TZ=America/New_York date --date=yesterday +%F)" in text
     assert "___leagues" not in text
+    assert "repository_dispatch" not in text
+    assert steps_by_name["Resolve final live refresh scope"]["if"] == (
+        "${{ steps.boundary.outputs.should_run == 'true' }}"
+    )
     assert steps_by_name["Reconstruct and verify the durable baseline"]["if"] == (
         "${{ steps.scope.outputs.should_refresh == 'true' }}"
     )
@@ -53,7 +49,7 @@ def test_live_nfl_ops_workflow_gates_release_and_fly_on_a_ready_scope():
     assert "steps.scope.outputs.should_refresh == 'true'" in steps_by_name[
         "Atomically promote the verified ops artifact"
     ]["if"]
-    assert "github.event_name == 'repository_dispatch'" in steps_by_name[
+    assert "github.event_name == 'schedule'" in steps_by_name[
         "Atomically promote the verified ops artifact"
     ]["if"]
 
